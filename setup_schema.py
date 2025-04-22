@@ -31,8 +31,45 @@ resume_schema = {
     }
 }
 
+
+job_description_schema = {
+    "validator": {
+        "$jsonSchema": {
+            "bsonType": "object",
+            "required": ["job_title", "upload_time", "file_type", "description"],
+            "properties": {
+                "job_title":     {"bsonType": "string"},
+                "upload_time":   {"bsonType": "date"},
+                "file_type":     {"bsonType": "string"},
+                "filename":      {"bsonType": "string"},
+                "file_data":     {"bsonType": ["binData", "null"]},
+                "description":   {"bsonType": "string"},
+
+                # Optional GPT-parsed structure
+                "parsed": {
+                    "bsonType": "object",
+                    "required": ["responsibilities", "required_skills", "qualifications"],
+                    "properties": {
+                        "responsibilities": {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "required_skills":  {"bsonType": "array", "items": {"bsonType": "string"}},
+                        "qualifications":   {"bsonType": "array", "items": {"bsonType": "string"}}
+                    }
+                }
+            }
+        }
+    }
+}
+
+
 # Only create or update if needed
 if "resumes" not in db.list_collection_names():
     db.create_collection("resumes", **resume_schema)
 else:
     db.command({"collMod": "resumes", **resume_schema})
+
+
+# Create job_descriptions collection if not present
+if "job_descriptions" not in db.list_collection_names():
+    db.create_collection("job_descriptions", **job_description_schema)
+else:
+    db.command({"collMod": "job_descriptions", **job_description_schema})
