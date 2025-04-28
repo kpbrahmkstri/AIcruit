@@ -389,6 +389,14 @@ def find_top_resumes_for_job2(job_title: str, top_n: int = 5):
 
     return sorted_resumes[:top_n], None
 
+
+# Helper function for parsing date
+def parse_date_or_none(dt_str):
+    try:
+        return date_parser.parse(dt_str, default=datetime(1900, 1, 1))
+    except Exception:
+        return None
+
 #─── STREAMLIT APP ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AIcruit", page_icon=":guardsman:", layout="wide")
 
@@ -433,13 +441,31 @@ resume_parser_prompt = ChatPromptTemplate.from_messages([
 
 resume_parser_chain = LLMChain(llm=llm, prompt=resume_parser_prompt)
 
-# 2) Evaluation Chain
+# Resume vs JD Evaluation Chain
 evaluation_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a resume evaluator. Given a parsed resume and a parsed job description, return a JSON matching this schema:\n"
-               "{ resumeId: string, jobId: string, overallScore: number, categoryScores: {skillsMatch,experienceMatch,educationMatch,certificationMatch}, "
-               "matchDetails: {matchedSkills,missingSkills,relevantExperience:{score,highlights},educationAlignment:{score,comments}}, "
-               "feedback:{strengths,weaknesses,improvementSuggestions}, llmAnalysis: string, llmModel: string, evaluationDate: string }"),
-    ("user", "Resume: {resume_parsed}\nJob: {jd_parsed}")
+    ("system",
+     "You are an AI resume evaluator.  \n"
+     "Given a resume and a job description, return valid JSON with these keys and types:  \n"
+     "- matched_skills (array of strings)  \n"
+     "- missing_skills (array of strings)  \n"
+     "- matched_experience (array of strings)  \n"
+     "- missing_experience (array of strings)  \n"
+     "- matched_certifications (array of strings)  \n"
+     "- missing_certifications (array of strings)  \n"
+     "- skills_match_score (number between 0 and 100)  \n"
+     "- experience_match_score (number between 0 and 100)  \n"
+     "- education_match_score (number between 0 and 100)  \n"
+     "- certification_match_score (number between 0 and 100)  \n"
+     "- overall_score (number between 0 and 100)  \n"
+     "- strengths (array of strings)  \n"
+     "- weaknesses (array of strings)  \n"
+     "Only output the JSON."
+    ),
+    ("user",
+     "Resume Text:\n{resume_text}\n\n"
+     "Job Description Text:\n{jd_text}\n\n"
+     "Return the JSON as specified."
+    )
 ])
 evaluation_chain = LLMChain(llm=llm, prompt=evaluation_prompt)
 
@@ -454,6 +480,17 @@ def parse_date_or_none(dt_str):
     except Exception:
         return None
 
+def evaluate_resume_against_jd(resume_text, jd_text):
+    try:
+        response = evaluation_chain.run({
+            "resume_text": resume_text,
+            "jd_text": jd_text
+        })
+        parsed = json.loads(response)
+        return parsed
+    except Exception as e:
+        print(f"Evaluation Error: {e}")
+        return None
 
 # Tab 1: Upload & Parse
 # ─── Tab 1: Upload, Parse, Save & Evaluate ────────────────────────────────────
@@ -461,118 +498,113 @@ def parse_date_or_none(dt_str):
 
 # === Tab 1: Upload, Parse, Save & Evaluate ===
 with tab1:
-    st.header("Upload Resume & Evaluate")
-    st.write("Select a job, upload a resume, then we parse, store, score, and evaluate.")
+    st.header("📄 Upload Resume → Parse → AI Evaluation → Save")
 
-    # 1) Load job options
+    # 1) Load all Job Titles
     all_jds = list(job_descriptions.find())
     titles = [jd["job_title"] for jd in all_jds]
-    selected_title = st.selectbox("Select Job to Apply", titles)
-    selected_jd = next(jd for jd in all_jds if jd["job_title"] == selected_title)
+    selected_title = st.selectbox("Select Job Title", ["Select Job Title"] + titles)
 
-    # 2) File uploader
-    uploaded_file = st.file_uploader("Upload PDF/DOCX Resume", type=["pdf", "docx"])
-    if not uploaded_file:
-        st.stop()
+    uploaded_file = st.file_uploader("Upload Resume (PDF/DOCX)", type=["pdf", "docx"])
 
-    # 3) Extract raw text
-    with st.spinner("Extracting resume text…"):
-        raw_text = extract_text(uploaded_file)
+    if uploaded_file and selected_title != "Select Job Title":
+        selected_jd = next((jd for jd in all_jds if jd["job_title"] == selected_title), None)
 
-    # 4) Parse resume via LangChain
-    with st.spinner("Parsing resume…"):
-        parsed_json = resume_parser_chain.run({"resume_text": raw_text})
-        resume_parsed = json.loads(parsed_json)
-    st.subheader("Parsed Resume")
-    st.json(resume_parsed)
+        # 2) Extract Resume Text
+        with st.spinner("Extracting resume text..."):
+            resume_text = extract_text(uploaded_file)
 
-    # 5) Normalize parsed data
-    normalized = {
-        "work_experience": resume_parsed.get("work_experience", []),
-        "education":       resume_parsed.get("education", ""),
-        "skills":          resume_parsed.get("skills", []),
-        "achievements":    resume_parsed.get("achievements", []),
-        "certifications":  resume_parsed.get("certifications", [])
-    }
-    st.subheader("Normalized for MongoDB")
-    st.json(normalized)
+        # 3) Parse Resume
+        with st.spinner("Parsing resume using GPT-4..."):
+            parsed_resume_json = resume_parser_chain.run({"resume_text": resume_text})
+            parsed_resume = json.loads(parsed_resume_json)
 
-    # 6) Convert date strings to datetime for each work_experience entry
-    for entry in normalized["work_experience"]:
-        if isinstance(entry, dict):
-            entry["start_date"] = parse_date_or_none(entry.get("start_date", ""))
-            entry["end_date"]   = parse_date_or_none(entry.get("end_date", ""))
+        st.subheader("Parsed Resume Output")
+        st.json(parsed_resume)
 
-    # 7) Save resume document to MongoDB
-    resume_doc = {
-        "filename":    uploaded_file.name,
-        "upload_time": datetime.utcnow(),
-        "file_type":   uploaded_file.type,
-        "file_data":   uploaded_file.getvalue(),
-        "job_id":      selected_jd["_id"],
-        "parsed":      normalized
-    }
-    res_insert = resumes.insert_one(resume_doc)
-    resume_id = res_insert.inserted_id
-    st.success(f"✅ Resume saved with ID: {resume_id}")
+        # 4) Normalize Resume Data
+        normalized = {
+            "work_experience": parsed_resume.get("work_experience", []),
+            "education": parsed_resume.get("education", ""),
+            "skills": parsed_resume.get("skills", []),
+            "achievements": parsed_resume.get("achievements", []),
+            "certifications": parsed_resume.get("certifications", [])
+        }
 
-    # 8) Compute overall match percentage via TF-IDF
-    jd_parsed = selected_jd["parsed"]
-    jd_text = " ".join([
-        "\n".join(jd_parsed.get("responsibilities", [])),
-        "\n".join(jd_parsed.get("required_skills", [])),
-        "\n".join(jd_parsed.get("qualifications", [])),
-        "\n".join(jd_parsed.get("certifications", []))
-    ])
-    resume_text = " ".join([
-        # join normalized fields into one string
-        "; ".join([str(work) for work in normalized["work_experience"]]),
-        normalized["education"],
-        ", ".join(normalized["skills"]),
-        ", ".join(normalized["achievements"]),
-        ", ".join(normalized["certifications"])
-    ])
-    vec = TfidfVectorizer().fit([jd_text, resume_text])
-    v0, v1 = vec.transform([jd_text, resume_text])
-    score = float(cosine_similarity(v0, v1)[0][0])
-    percent_match = round(score * 100, 2)
-    st.info(f"Overall Match: {percent_match}%")
+        for job in normalized["work_experience"]:
+            if isinstance(job, dict):
+                job["start_date"] = parse_date_or_none(job.get("start_date", ""))
+                job["end_date"] = parse_date_or_none(job.get("end_date", ""))
 
-    # 9) Build & save evaluation document
-    eval_doc = {
-        "resumeId":       resume_id,
-        "jobId":          selected_jd["_id"],
-        "overallScore":   percent_match,
-        "categoryScores": {
-            "skillsMatch":         percent_match,
-            "experienceMatch":     percent_match,
-            "educationMatch":      percent_match,
-            "certificationMatch":  percent_match
-        },
-        "matchDetails": {
-            "matchedSkills":       normalized["skills"],
-            "missingSkills":       [],  # could diff vs jd_parsed["required_skills"]
-            "relevantExperience": {
-                "score":      percent_match,
-                "highlights": []
-            },
-            "educationAlignment": {
-                "score":    percent_match,
-                "comments": ""
+        # 5) Save Resume into MongoDB
+        resume_doc = {
+            "filename": uploaded_file.name,
+            "upload_time": datetime.utcnow(),
+            "file_type": uploaded_file.type,
+            "file_data": uploaded_file.getvalue(),
+            "job_id": selected_jd["_id"],
+            "parsed": normalized
+        }
+        res_insert = resumes.insert_one(resume_doc)
+        resume_id = res_insert.inserted_id
+        st.success(f"✅ Resume saved successfully (ID: {resume_id})")
+
+        # 6) Prepare JD Text
+        jd_parsed = selected_jd.get("parsed", {})
+        jd_text = "\n".join([
+            "\n".join(jd_parsed.get("responsibilities", [])),
+            "\n".join(jd_parsed.get("required_skills", [])),
+            "\n".join(jd_parsed.get("qualifications", [])),
+            "\n".join(jd_parsed.get("certifications", []))
+        ])
+
+        # 7) Evaluate Resume vs JD
+        with st.spinner("Running deep AI Evaluation using GPT-4..."):
+            eval_output = evaluate_resume_against_jd(resume_text, jd_text)
+
+        if eval_output:
+            st.subheader("AI Evaluation Output")
+            st.json(eval_output)
+
+            # 8) Build Evaluation Document
+            eval_doc = {
+                "resumeId": resume_id,
+                "jobId": selected_jd["_id"],
+                "overallScore": float(eval_output.get("overall_score", 0)),
+                "categoryScores": {
+                    "skillsMatch": float(eval_output.get("skills_match_score", 0)),
+                    "experienceMatch": float(eval_output.get("experience_match_score", 0)),
+                    "educationMatch": float(eval_output.get("education_match_score", 0)),
+                    "certificationMatch": float(eval_output.get("certification_match_score", 0)),
+                },
+                "matchDetails": {
+                    "matchedSkills": eval_output.get("matched_skills", []),
+                    "missingSkills": eval_output.get("missing_skills", []),
+                    "relevantExperience": {
+                        "score": float(eval_output.get("experience_match_score", 0)),
+                        "highlights": eval_output.get("matched_experience", [])
+                    },
+                    "educationAlignment": {
+                        "score": float(eval_output.get("education_match_score", 0)),
+                        "comments": ""
+                    }
+                },
+                "feedback": {
+                    "strengths": eval_output.get("strengths", []),
+                    "weaknesses": eval_output.get("weaknesses", []),
+                    "improvementSuggestions": eval_output.get("missing_skills", [])
+                },
+                "llmAnalysis": "Evaluation generated using GPT-4 (LangChain).",
+                "llmModel": "GPT-4",
+                "evaluationDate": datetime.utcnow()
             }
-        },
-        "feedback": {
-            "strengths":             [],
-            "weaknesses":            [],
-            "improvementSuggestions": []
-        },
-        "llmAnalysis":    f"Resume matches JD at {percent_match}%.",
-        "llmModel":       "TF-IDF+Cosine",
-        "evaluationDate": datetime.utcnow()
-    }
-    ev_insert = evaluations.insert_one(eval_doc)
-    st.success(f"✅ Evaluation saved with ID: {ev_insert.inserted_id}")
+            ev_insert = evaluations.insert_one(eval_doc)
+            st.success(f"✅ Evaluation saved successfully (ID: {ev_insert.inserted_id})")
 
+    elif uploaded_file:
+        st.warning("⚠️ Please select a valid Job Title before uploading a resume.")
+    else:
+        st.info("📥 Upload a resume and select a job title to begin.")
 
 # 1) LLM client
 llm = ChatOpenAI(model_name="gpt-4", temperature=0)
@@ -669,28 +701,89 @@ with tab2:
 
 
 # Tab 3: Matching 
+import base64
+
+# Helper function to create a download link for each resume
+def generate_download_link(file_data, filename, label="Download Resume"):
+    b64 = base64.b64encode(file_data).decode()
+    return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
+
+# === TAB 3: Top Resumes for a Job ===
 with tab3:
-    st.header("Job Description Matching")
-    st.write("Select a job description and view top matching resumes.")
+    st.header("Top Resumes for Selected Job (Detailed View)")
 
-    # Fetch unique job titles from MongoDB
-    try:
-        job_titles = job_descriptions.distinct("job_title")
-        if not job_titles:
-            st.warning("No job descriptions found. Please upload some in Tab 2.")
+    # 1) Fetch all Job Titles
+    jd_list = list(job_descriptions.find())
+    jd_title_list = ["Select Job Title"] + [jd["job_title"] for jd in jd_list]
+    
+    selected_title = st.selectbox("Choose Job Title", jd_title_list)
+
+    if selected_title != "Select Job Title":
+        selected_jd = next((jd for jd in jd_list if jd["job_title"] == selected_title), None)
+
+        if selected_jd:
+            matching_resumes = list(resumes.find({"job_id": selected_jd["_id"]}))
+
+            if matching_resumes:
+                resume_ids = [res["_id"] for res in matching_resumes]
+                evals = list(evaluations.find({"resumeId": {"$in": resume_ids}}))
+
+                rows = []
+                for res in matching_resumes:
+                    eval_entry = next((ev for ev in evals if ev["resumeId"] == res["_id"]), None)
+                    
+                    if not eval_entry:
+                        continue  # skip resumes without evaluation
+
+                    # Build a row
+                    rows.append({
+                        "Filename": res["filename"],
+                        "Download": generate_download_link(res["file_data"], res["filename"]),
+                        "% Match (Overall)": round(eval_entry.get("overallScore", 0.0), 2),
+                        "Skills Match": round(eval_entry.get("categoryScores", {}).get("skillsMatch", 0.0), 2),
+                        "Experience Match": round(eval_entry.get("categoryScores", {}).get("experienceMatch", 0.0), 2),
+                        "Education Match": round(eval_entry.get("categoryScores", {}).get("educationMatch", 0.0), 2),
+                        "Certification Match": round(eval_entry.get("categoryScores", {}).get("certificationMatch", 0.0), 2),
+                        "Missing Skills": ", ".join(eval_entry.get("matchDetails", {}).get("missingSkills", [])),
+                        "Strengths": ", ".join(eval_entry.get("feedback", {}).get("strengths", [])),
+                        "Weaknesses": ", ".join(eval_entry.get("feedback", {}).get("weaknesses", [])),
+                    })
+
+                # Sort rows based on Overall Score DESCENDING (highest match first)
+                rows = sorted(rows, key=lambda x: x["% Match (Overall)"], reverse=True)
+
+                # Add rank
+                for idx, row in enumerate(rows, start=1):
+                    row["Rank"] = idx
+
+                # Reorder columns for better UX
+                columns_order = [
+                    "Rank", "Filename", "Download",
+                    "% Match (Overall)", "Skills Match", "Experience Match", "Education Match", "Certification Match",
+                    "Missing Skills", "Strengths", "Weaknesses"
+                ]
+                rows_display = [{col: r[col] for col in columns_order} for r in rows]
+
+                st.subheader(f"Resumes for {selected_title}")
+                st.write("Sorted by highest overall match %")
+
+                # Show table with HTML download links
+                st.write(
+                    f'<style>table {{font-size: 14px;}}</style>',
+                    unsafe_allow_html=True
+                )
+                st.write(
+                    pd.DataFrame(rows_display).to_html(escape=False, index=False),
+                    unsafe_allow_html=True
+                )
+
+            else:
+                st.info("No resumes uploaded for this job description yet.")
         else:
-            selected_job_title = st.selectbox("Select Job Description Title", sorted(job_titles))
+            st.error("Selected Job Description not found!")
+    else:
+        st.info("Please select a Job Title to view resumes.")
 
-            if st.button("Find Top Resumes"):
-                with st.spinner("Evaluating resumes..."):
-                    results, error = find_top_resumes_for_job(selected_job_title)
-                    if error:
-                        st.error(error)
-                    else:
-                        df = pd.DataFrame(results)
-                        st.dataframe(df)
-    except Exception as e:
-        st.error(f"Error loading job titles: {e}")
 
 with tab4:
     st.header("📈 Resume Analytics Dashboard")
