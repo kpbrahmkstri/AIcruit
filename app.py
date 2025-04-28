@@ -7,6 +7,7 @@ import pdfplumber
 import docx
 import openai
 import base64
+from dateutil import parser as date_parser
 from streamlit.components.v1 import html
 import altair as alt
 
@@ -17,6 +18,10 @@ from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.chains import LLMChain
+
 #─── ENV & CLIENT SETUP ─────────────────────────────────────────────────────────
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -26,6 +31,7 @@ client    = MongoClient(mongo_uri)
 db        = client["aicruit"]
 resumes   = db["resumes"]
 job_descriptions = db["job_descriptions"]
+evaluations = db["evaluations"]
 
 #─── RAW TEXT EXTRACTION ────────────────────────────────────────────────────────
 def extract_text(uploaded_file) -> str:
@@ -405,97 +411,261 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 
+# ─── LangChain Setup ───────────────────────────────────────────────────────────
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.chains import LLMChain
+
+llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+
+# 1) Resume Parser Chain
+resume_parser_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "You are a resume parser. Return valid JSON with these keys:\n"
+     "1. work_experience: list of objects with keys job_title, company, start_date, end_date, description\n"
+     "2. education: string\n"
+     "3. skills: list of strings\n"
+     "4. achievements: list of strings\n"
+     "5. certifications: list of strings"
+    ),
+    ("user", "{resume_text}")
+])
+
+resume_parser_chain = LLMChain(llm=llm, prompt=resume_parser_prompt)
+
+# 2) Evaluation Chain
+evaluation_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a resume evaluator. Given a parsed resume and a parsed job description, return a JSON matching this schema:\n"
+               "{ resumeId: string, jobId: string, overallScore: number, categoryScores: {skillsMatch,experienceMatch,educationMatch,certificationMatch}, "
+               "matchDetails: {matchedSkills,missingSkills,relevantExperience:{score,highlights},educationAlignment:{score,comments}}, "
+               "feedback:{strengths,weaknesses,improvementSuggestions}, llmAnalysis: string, llmModel: string, evaluationDate: string }"),
+    ("user", "Resume: {resume_parsed}\nJob: {jd_parsed}")
+])
+evaluation_chain = LLMChain(llm=llm, prompt=evaluation_prompt)
+
+def parse_date_or_none(dt_str):
+    """
+    Try to parse a date string into a datetime.
+    If it fails (e.g. “Current”), return None.
+    """
+    try:
+        # supply default day for month/year inputs
+        return date_parser.parse(dt_str, default=datetime(1900, 1, 1))
+    except Exception:
+        return None
+
+
 # Tab 1: Upload & Parse
+# ─── Tab 1: Upload, Parse, Save & Evaluate ────────────────────────────────────
+
+
+# === Tab 1: Upload, Parse, Save & Evaluate ===
 with tab1:
-    st.header("Upload Resume")
-    st.write("Upload a resume (PDF or DOCX) to extract key sections and save to MongoDB.")
+    st.header("Upload Resume & Evaluate")
+    st.write("Select a job, upload a resume, then we parse, store, score, and evaluate.")
 
-    uploaded_file = st.file_uploader("Choose a file", type=["pdf", "docx"])
-    if uploaded_file:
-        # 1) Extract raw text
-        with st.spinner("Extracting text…"):
-            raw_text = extract_text(uploaded_file)
+    # 1) Load job options
+    all_jds = list(job_descriptions.find())
+    titles = [jd["job_title"] for jd in all_jds]
+    selected_title = st.selectbox("Select Job to Apply", titles)
+    selected_jd = next(jd for jd in all_jds if jd["job_title"] == selected_title)
 
-        # 2) Parse via GPT-4
-        with st.spinner("Parsing sections via GPT-4…"):
-            try:
-                parsed_data = parse_with_gpt(raw_text)
-                # Show the original parsed data
-                st.subheader("Original Parsed Data")
-                st.json(parsed_data)
-                
-                # 3) Normalize data for MongoDB schema compatibility
-                normalized_parsed = normalize_for_mongodb(parsed_data)
-                
-                st.subheader("Normalized Data for MongoDB")
-                st.json(normalized_parsed)
-            except Exception as e:
-                st.error(f"Parsing error: {e}")
-                parsed_data = None
-                normalized_parsed = None
+    # 2) File uploader
+    uploaded_file = st.file_uploader("Upload PDF/DOCX Resume", type=["pdf", "docx"])
+    if not uploaded_file:
+        st.stop()
 
-        if normalized_parsed:
-            # 4) Insert into MongoDB
-            doc = {
-                "filename": uploaded_file.name,
-                "upload_time": datetime.utcnow(),
-                "file_type": uploaded_file.type,
-                "file_data": uploaded_file.getvalue(),
-                "parsed": normalized_parsed
+    # 3) Extract raw text
+    with st.spinner("Extracting resume text…"):
+        raw_text = extract_text(uploaded_file)
+
+    # 4) Parse resume via LangChain
+    with st.spinner("Parsing resume…"):
+        parsed_json = resume_parser_chain.run({"resume_text": raw_text})
+        resume_parsed = json.loads(parsed_json)
+    st.subheader("Parsed Resume")
+    st.json(resume_parsed)
+
+    # 5) Normalize parsed data
+    normalized = {
+        "work_experience": resume_parsed.get("work_experience", []),
+        "education":       resume_parsed.get("education", ""),
+        "skills":          resume_parsed.get("skills", []),
+        "achievements":    resume_parsed.get("achievements", []),
+        "certifications":  resume_parsed.get("certifications", [])
+    }
+    st.subheader("Normalized for MongoDB")
+    st.json(normalized)
+
+    # 6) Convert date strings to datetime for each work_experience entry
+    for entry in normalized["work_experience"]:
+        if isinstance(entry, dict):
+            entry["start_date"] = parse_date_or_none(entry.get("start_date", ""))
+            entry["end_date"]   = parse_date_or_none(entry.get("end_date", ""))
+
+    # 7) Save resume document to MongoDB
+    resume_doc = {
+        "filename":    uploaded_file.name,
+        "upload_time": datetime.utcnow(),
+        "file_type":   uploaded_file.type,
+        "file_data":   uploaded_file.getvalue(),
+        "job_id":      selected_jd["_id"],
+        "parsed":      normalized
+    }
+    res_insert = resumes.insert_one(resume_doc)
+    resume_id = res_insert.inserted_id
+    st.success(f"✅ Resume saved with ID: {resume_id}")
+
+    # 8) Compute overall match percentage via TF-IDF
+    jd_parsed = selected_jd["parsed"]
+    jd_text = " ".join([
+        "\n".join(jd_parsed.get("responsibilities", [])),
+        "\n".join(jd_parsed.get("required_skills", [])),
+        "\n".join(jd_parsed.get("qualifications", [])),
+        "\n".join(jd_parsed.get("certifications", []))
+    ])
+    resume_text = " ".join([
+        # join normalized fields into one string
+        "; ".join([str(work) for work in normalized["work_experience"]]),
+        normalized["education"],
+        ", ".join(normalized["skills"]),
+        ", ".join(normalized["achievements"]),
+        ", ".join(normalized["certifications"])
+    ])
+    vec = TfidfVectorizer().fit([jd_text, resume_text])
+    v0, v1 = vec.transform([jd_text, resume_text])
+    score = float(cosine_similarity(v0, v1)[0][0])
+    percent_match = round(score * 100, 2)
+    st.info(f"Overall Match: {percent_match}%")
+
+    # 9) Build & save evaluation document
+    eval_doc = {
+        "resumeId":       resume_id,
+        "jobId":          selected_jd["_id"],
+        "overallScore":   percent_match,
+        "categoryScores": {
+            "skillsMatch":         percent_match,
+            "experienceMatch":     percent_match,
+            "educationMatch":      percent_match,
+            "certificationMatch":  percent_match
+        },
+        "matchDetails": {
+            "matchedSkills":       normalized["skills"],
+            "missingSkills":       [],  # could diff vs jd_parsed["required_skills"]
+            "relevantExperience": {
+                "score":      percent_match,
+                "highlights": []
+            },
+            "educationAlignment": {
+                "score":    percent_match,
+                "comments": ""
             }
-            
-            try:
-                result = resumes.insert_one(doc)
-                st.success(f"Resume parsed and saved to MongoDB with ID: {result.inserted_id}")
-            except Exception as e:
-                st.error(f"Error saving to MongoDB: {str(e)}")
+        },
+        "feedback": {
+            "strengths":             [],
+            "weaknesses":            [],
+            "improvementSuggestions": []
+        },
+        "llmAnalysis":    f"Resume matches JD at {percent_match}%.",
+        "llmModel":       "TF-IDF+Cosine",
+        "evaluationDate": datetime.utcnow()
+    }
+    ev_insert = evaluations.insert_one(eval_doc)
+    st.success(f"✅ Evaluation saved with ID: {ev_insert.inserted_id}")
 
 
-# === TAB 2: Job Description Upload (Manual Input + Upload) ===
+# 1) LLM client
+llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+
+# 2) Prompt template for JD parsing (responsibilities, required_skills, qualifications, certifications)
+jd_parser_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a job description parser. Extract and return valid JSON with keys: responsibilities, required_skills, qualifications, certifications."),
+    ("user", "{jd_text}")
+])
+
+# 3) Build the chain
+jd_parser_chain = LLMChain(llm=llm, prompt=jd_parser_prompt)
+
+
+# === TAB 2: Job Description Upload (LangChain) ===
+
+# === TAB 2: Job Description Upload & Parsing (LangChain) ===
+# === TAB 2: Job Description Upload & Parsing (LangChain) ===
 with tab2:
-    st.header("Upload or Enter Job Description")
-    st.write("Enter the job title and description manually, or upload a JD file.")
+    st.header("📄 Job Description Upload & Parsing")
+    st.write("Enter job title + description or upload a JD file; then LangChain will parse it.")
 
-    job_title = st.text_input("Job Title", placeholder="e.g., Software Engineer")
+    # Initialize session state for text inputs
+    if "job_title" not in st.session_state:
+        st.session_state.job_title = ""
+    if "job_desc_input" not in st.session_state:
+        st.session_state.job_desc_input = ""
 
-    jd_file = st.file_uploader("Or Upload a Job Description File", type=["pdf", "docx"], key="jd")
+    # Widgets with explicit keys
+    job_title = st.text_input(
+        "Job Title",
+        value=st.session_state.job_title,
+        key="job_title",
+        placeholder="e.g., Data Scientist"
+    )
+    jd_file = st.file_uploader(
+        "Or Upload JD PDF/DOCX",
+        type=["pdf", "docx"],
+        key="jd_file"
+    )
 
+    # Extract text if file uploaded
     jd_text = ""
     if jd_file:
-        with st.spinner("Extracting text from JD file..."):
+        with st.spinner("Extracting text…"):
             jd_text = extract_text(jd_file)
 
-    job_desc_input = st.text_area("Job Description", value=jd_text, height=300)
+    job_desc_input = st.text_area(
+        "Job Description",
+        value=jd_text if jd_text else st.session_state.job_desc_input,
+        key="job_desc_input",
+        height=250
+    )
 
-    if st.button("Parse and Save Job Description"):
+    if st.button("Parse & Save Job Description"):
         if not job_title.strip():
-            st.warning("⚠️ Please provide a job title.")
+            st.warning("Please enter a job title.")
         elif not job_desc_input.strip():
-            st.warning("⚠️ Please enter or upload a job description.")
+            st.warning("Please enter or upload a job description.")
         else:
             try:
-                with st.spinner("Parsing job description via GPT-4..."):
-                    parsed_jd = parse_jd_with_gpt(job_desc_input.strip())
+                with st.spinner("LangChain parsing via GPT-4…"):
+                    chain_output = jd_parser_chain.run({"jd_text": job_desc_input.strip()})
+                    parsed_jd = json.loads(chain_output)
 
-                st.success("✅ Parsed JD Structure")
-                st.json(parsed_jd)
-
+                parsed_jd.setdefault("certifications", [])
                 jd_doc = {
-                    "job_title": job_title.strip(),
+                    "job_title":   job_title.strip(),
                     "upload_time": datetime.utcnow(),
-                    "file_type": jd_file.type if jd_file else "text",
-                    "filename": jd_file.name if jd_file else "manual_entry",
-                    "file_data": jd_file.getvalue() if jd_file else None,
+                    "file_type":   jd_file.type if jd_file else "text",
+                    "filename":    jd_file.name if jd_file else "manual_entry",
+                    "file_data":   jd_file.getvalue() if jd_file else None,
                     "description": job_desc_input.strip(),
-                    "parsed": parsed_jd
+                    "parsed": {
+                        "responsibilities": parsed_jd.get("responsibilities", []),
+                        "required_skills":  parsed_jd.get("required_skills", []),
+                        "qualifications":   parsed_jd.get("qualifications", []),
+                        "certifications":   parsed_jd.get("certifications", [])
+                    }
                 }
 
                 result = job_descriptions.insert_one(jd_doc)
-                st.success(f"✅ Job Description saved with ID: {result.inserted_id}")
+                st.success(f"✅ Saved JD with ID: {result.inserted_id}")
+
+                # Reset only the text inputs
+                st.session_state.job_title = ""
+                st.session_state.job_desc_input = ""
+
+                # Rerun to clear file_uploader visually
+                st.experimental_rerun()
 
             except Exception as e:
-                st.error(f"❌ GPT or MongoDB Error: {e}")
-
+                st.error(f"❌ Error: {e}")
 
 
 # Tab 3: Matching 
@@ -525,65 +695,119 @@ with tab3:
 with tab4:
     st.header("📈 Resume Analytics Dashboard")
 
+    # Fetch all job titles
     job_titles = job_descriptions.distinct("job_title")
-    if not job_titles:
-        st.warning("No job descriptions found. Please upload some in Tab 2.")
+    job_titles = ["Select Job Title..."] + sorted(job_titles)
+
+    selected_title = st.selectbox("Select Job Title", job_titles, key="dashboard_title")
+
+    if selected_title and selected_title != "Select Job Title...":
+        with st.spinner("Loading resumes and evaluating..."):
+            # Fetch and score resumes for the selected job title
+            results, error = find_top_resumes_for_job(selected_title, top_n=50)
+
+            if error:
+                st.error(error)
+            elif not results:
+                st.info("No resumes found for this job title.")
+            else:
+                df = pd.DataFrame(results)
+
+                st.subheader("🏆 Leaderboard")
+                df_sorted = df.sort_values(by="Overall Score", ascending=False).reset_index(drop=True)
+                df_sorted.index += 1
+                if "Rank" in df_sorted.columns:
+                    df_sorted = df_sorted.drop(columns=["Rank"])
+                df_sorted.insert(0, "Rank", df_sorted.index)
+
+                st.dataframe(df_sorted[[
+                    "Rank", "Filename", "Overall Score",
+                    "Soft Skills", 
+                    "Tech Skills", 
+                    "Presentation", 
+                    "Keyword Match"
+                ]])
+
+                st.markdown("---")
+
+                # Scatter plot
+                st.subheader("📈 Resume Match Scatter Plot")
+
+                # Create ideal JD reference point
+                jd_reference = pd.DataFrame([{
+                    "Filename": "⭐ Job Description (Ideal)",
+                    "Tech Skills": 10,
+                    "Soft Skills": 10,
+                    "Overall Score": 10,
+                    "Keyword Match": 10,
+                    "Presentation": 10
+                }])
+
+                # Scatter for resumes
+                scatter = alt.Chart(df_sorted).mark_circle(size=150).encode(
+                    x=alt.X("Tech Skills:Q", title="Technical Skills Match (/10)"),
+                    y=alt.Y("Soft Skills:Q", title="Soft Skills Match (/10)"),
+                    color=alt.Color(
+                        "Overall Score:Q",
+                        scale=alt.Scale(domain=[5, 8, 10], range=["red", "yellow", "green"]),
+                        legend=alt.Legend(title="Match Quality")
+                    ),
+                    size=alt.Size("Overall Score:Q", scale=alt.Scale(range=[100, 500])),
+                    tooltip=["Filename", "Overall Score", "Keyword Match", "Tech Skills", "Soft Skills", "Presentation"]
+                )
+
+                # Star for JD
+                star = alt.Chart(jd_reference).mark_point(
+                    shape="star", 
+                    size=500, 
+                    color="gold"
+                ).encode(
+                    x=alt.X("Tech Skills:Q"),
+                    y=alt.Y("Soft Skills:Q"),
+                    tooltip=["Filename"]
+                )
+
+                # Labels for resumes
+                text = alt.Chart(df_sorted).mark_text(
+                    align='left',
+                    baseline='middle',
+                    dx=7
+                ).encode(
+                    x="Tech Skills:Q",
+                    y="Soft Skills:Q",
+                    text="Filename"
+                )
+
+                # Label for JD
+                jd_text = alt.Chart(jd_reference).mark_text(
+                    text="⭐ JD",
+                    align="left",
+                    baseline="middle",
+                    dx=7
+                ).encode(
+                    x="Tech Skills:Q",
+                    y="Soft Skills:Q"
+                )
+
+                # Final combined plot
+                final_chart = alt.layer(
+                    scatter,
+                    star,
+                    text,
+                    jd_text
+                ).resolve_scale(
+                    x='shared',
+                    y='shared'
+                ).properties(
+                    height=600,
+                    title="Resume Match vs Job Description"
+                )
+
+                st.altair_chart(final_chart, use_container_width=True)
+
+                # CSV download
+                csv = df_sorted.to_csv(index=False).encode("utf-8")
+                st.download_button("📥 Download Leaderboard CSV", csv, "leaderboard.csv", "text/csv")
+
     else:
-        selected_title = st.selectbox("Select Job Title", sorted(job_titles), key="dashboard_title")
-
-        # Fetch matched resumes for selected job title
-        matches = resumes.find()
-        matched_data = []
-
-        for res in matches:
-            parsed = res.get("parsed", {})
-            if not parsed:
-                continue
-
-            matched_data.append({
-                "Filename": res.get("filename", "N/A"),
-                "Upload Time": res.get("upload_time"),
-                "Soft Skills Score": res.get("soft_skills_score", 0),
-                "Technical Skills Score": res.get("technical_skills_score", 0),
-                "Presentation Score": res.get("presentation_score", 0),
-                "Keyword Match Score": res.get("keyword_score", 0),
-                "Overall Score": res.get("overall_score", 0),
-                "Download Link": f"data:application/octet-stream;base64,{res.get('file_data').hex()}"
-            })
-
-        if not matched_data:
-            st.info("No resumes matched or scored yet for this title.")
-        else:
-            df = pd.DataFrame(matched_data)
-            df_sorted = df.sort_values(by="Overall Score", ascending=False).reset_index(drop=True)
-            df_sorted.index += 1
-            df_sorted.insert(0, "Rank", df_sorted.index)
-
-            st.subheader("🏆 Leaderboard")
-            st.dataframe(df_sorted[["Rank", "Filename", "Overall Score", "Soft Skills Score", "Technical Skills Score", "Presentation Score", "Keyword Match Score"]])
-
-            # Bar Chart of Overall Scores
-            st.subheader("📊 Score Distribution")
-            bar_chart = alt.Chart(df_sorted).mark_bar().encode(
-                x=alt.X("Filename", sort='-y'),
-                y="Overall Score",
-                color=alt.Color("Overall Score", scale=alt.Scale(scheme='blues')),
-                tooltip=["Filename", "Overall Score"]
-            ).properties(height=400)
-            st.altair_chart(bar_chart, use_container_width=True)
-
-            # Optional: Radar chart or radar-style scores for selected resume
-            selected_candidate = st.selectbox("Analyze Candidate", df_sorted["Filename"].tolist(), key="candidate_analysis")
-            selected_row = df_sorted[df_sorted["Filename"] == selected_candidate].iloc[0]
-
-            st.markdown("### Resume Strength Radar")
-            st.write({
-                "Soft Skills": selected_row["Soft Skills Score"],
-                "Technical Skills": selected_row["Technical Skills Score"],
-                "Presentation": selected_row["Presentation Score"],
-                "Keyword Match": selected_row["Keyword Match Score"]
-            })
-
-            # Download as CSV
-            csv = df_sorted.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download Leaderboard CSV", csv, "leaderboard.csv", "text/csv")
+        st.info("Please select a job title from the dropdown to see the leaderboard and scatter plot.")
