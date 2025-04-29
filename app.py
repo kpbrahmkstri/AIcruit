@@ -708,20 +708,22 @@ def generate_download_link(file_data, filename, label="Download Resume"):
     b64 = base64.b64encode(file_data).decode()
     return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
 
-# === TAB 3: Top Resumes for a Job ===
+
+# ─── Tab 3: Top Resume Matching + Scatter Plot ───────────────────────────────
 with tab3:
-    st.header("Top Resumes for Selected Job (Detailed View)")
+    st.header("📊 Top Resumes for Selected Job")
 
     # 1) Fetch all Job Titles
     jd_list = list(job_descriptions.find())
     jd_title_list = ["Select Job Title"] + [jd["job_title"] for jd in jd_list]
-    
-    selected_title = st.selectbox("Choose Job Title", jd_title_list)
+
+    selected_title = st.selectbox("Select Job Title to View Resumes", jd_title_list)
 
     if selected_title != "Select Job Title":
         selected_jd = next((jd for jd in jd_list if jd["job_title"] == selected_title), None)
 
         if selected_jd:
+            # 2) Fetch all resumes and evaluations for this JD
             matching_resumes = list(resumes.find({"job_id": selected_jd["_id"]}))
 
             if matching_resumes:
@@ -729,60 +731,87 @@ with tab3:
                 evals = list(evaluations.find({"resumeId": {"$in": resume_ids}}))
 
                 rows = []
+                scatter_data = []
+
                 for res in matching_resumes:
                     eval_entry = next((ev for ev in evals if ev["resumeId"] == res["_id"]), None)
                     
                     if not eval_entry:
-                        continue  # skip resumes without evaluation
+                        continue
 
-                    # Build a row
+                    # Build leaderboard row
                     rows.append({
                         "Filename": res["filename"],
                         "Download": generate_download_link(res["file_data"], res["filename"]),
-                        "% Match (Overall)": round(eval_entry.get("overallScore", 0.0), 2),
-                        "Skills Match": round(eval_entry.get("categoryScores", {}).get("skillsMatch", 0.0), 2),
-                        "Experience Match": round(eval_entry.get("categoryScores", {}).get("experienceMatch", 0.0), 2),
-                        "Education Match": round(eval_entry.get("categoryScores", {}).get("educationMatch", 0.0), 2),
-                        "Certification Match": round(eval_entry.get("categoryScores", {}).get("certificationMatch", 0.0), 2),
+                        "% Match (Overall)": round(eval_entry.get("overallScore", 0), 2),
+                        "Skills Match": round(eval_entry.get("categoryScores", {}).get("skillsMatch", 0), 2),
+                        "Experience Match": round(eval_entry.get("categoryScores", {}).get("experienceMatch", 0), 2),
+                        "Education Match": round(eval_entry.get("categoryScores", {}).get("educationMatch", 0), 2),
+                        "Certification Match": round(eval_entry.get("categoryScores", {}).get("certificationMatch", 0), 2),
                         "Missing Skills": ", ".join(eval_entry.get("matchDetails", {}).get("missingSkills", [])),
                         "Strengths": ", ".join(eval_entry.get("feedback", {}).get("strengths", [])),
                         "Weaknesses": ", ".join(eval_entry.get("feedback", {}).get("weaknesses", [])),
+                        "Upload Time": res["upload_time"].strftime("%Y-%m-%d %H:%M:%S")
                     })
 
-                # Sort rows based on Overall Score DESCENDING (highest match first)
+                    # Build scatter data
+                    scatter_data.append({
+                        "Name": res["filename"],
+                        "Skills Match": eval_entry.get("categoryScores", {}).get("skillsMatch", 0),
+                        "Experience Match": eval_entry.get("categoryScores", {}).get("experienceMatch", 0),
+                        "Type": "Resume"
+                    })
+
+                # Sort rows by highest overall score
                 rows = sorted(rows, key=lambda x: x["% Match (Overall)"], reverse=True)
 
-                # Add rank
-                for idx, row in enumerate(rows, start=1):
+                # Add Rank
+                for idx, row in enumerate(rows, 1):
                     row["Rank"] = idx
 
-                # Reorder columns for better UX
+                # Reorder columns nicely
                 columns_order = [
                     "Rank", "Filename", "Download",
                     "% Match (Overall)", "Skills Match", "Experience Match", "Education Match", "Certification Match",
-                    "Missing Skills", "Strengths", "Weaknesses"
+                    "Missing Skills", "Strengths", "Weaknesses", "Upload Time"
                 ]
                 rows_display = [{col: r[col] for col in columns_order} for r in rows]
 
-                st.subheader(f"Resumes for {selected_title}")
-                st.write("Sorted by highest overall match %")
-
-                # Show table with HTML download links
-                st.write(
-                    f'<style>table {{font-size: 14px;}}</style>',
-                    unsafe_allow_html=True
-                )
+                # 3) Show Leaderboard Table
+                st.subheader(f"🏆 Top Resumes for: {selected_title}")
                 st.write(
                     pd.DataFrame(rows_display).to_html(escape=False, index=False),
                     unsafe_allow_html=True
                 )
+
+                # 4) Scatter Plot after Table
+                if scatter_data:
+                    # Add JD as the starting reference point
+                    scatter_data.append({
+                        "Name": f"JD - {selected_title}",
+                        "Skills Match": 100,
+                        "Experience Match": 100,
+                        "Type": "Job Description"
+                    })
+
+                    scatter_df = pd.DataFrame(scatter_data)
+
+                    scatter_chart = alt.Chart(scatter_df).mark_circle(size=120).encode(
+                        x=alt.X('Skills Match:Q', scale=alt.Scale(domain=[0, 110])),
+                        y=alt.Y('Experience Match:Q', scale=alt.Scale(domain=[0, 110])),
+                        color='Type:N',
+                        tooltip=['Name', 'Skills Match', 'Experience Match']
+                    ).interactive()
+
+                    st.subheader("📈 Resume vs Job Description - Skills vs Experience Match")
+                    st.altair_chart(scatter_chart, use_container_width=True)
 
             else:
                 st.info("No resumes uploaded for this job description yet.")
         else:
             st.error("Selected Job Description not found!")
     else:
-        st.info("Please select a Job Title to view resumes.")
+        st.info("Please select a Job Title first to view matching resumes.")
 
 
 with tab4:
