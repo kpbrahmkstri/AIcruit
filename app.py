@@ -77,68 +77,6 @@ def normalize_for_mongodb(parsed_data):
     
     return normalized
 
-#─── STRUCTURED PARSING VIA GPT ─────────────────────────────────────────────────
-def parse_with_gpt_old(resume_text: str) -> dict:
-    system = {
-        "role": "system",
-        "content": (
-            "You are a JSON-output resume parser. "
-            "Given a resume text, extract and return JSON with keys: "
-            "work_experience, education, skills, achievements."
-        )
-    }
-    user = {"role": "user", "content": resume_text}
-
-    resp = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[system, user],
-        temperature=0
-    )
-    return json.loads(resp.choices[0].message.content.strip())
-
-def parse_with_gpt(resume_text: str) -> dict:
-    system = {"role": "system", "content": (
-        "You are a JSON-output resume parser. Given a resume text, extract and return JSON with keys: work_experience, education, skills, achievements."
-    )}
-    user = {"role": "user", "content": resume_text}
-    resp = openai.ChatCompletion.create(model="gpt-4", messages=[system, user], temperature=0)
-    return json.loads(resp.choices[0].message.content.strip())
-
-
-# ─── STRUCTURED JOB DESCRIPTION PARSING VIA GPT ────────────────────────────────
-def parse_jd_with_gpt_old(jd_text: str) -> dict:
-    """
-    Extract structured fields like responsibilities, required_skills, and qualifications
-    from a job description using GPT.
-    """
-    system = {
-        "role": "system",
-        "content": (
-            "You are a job description parser. Extract and return a JSON with these fields:\n"
-            "- responsibilities: list of key responsibilities\n"
-            "- required_skills: list of skills or technologies required\n"
-            "- qualifications: list of qualifications or degrees expected\n"
-            "Return valid JSON only."
-        )
-    }
-    user = {"role": "user", "content": jd_text}
-
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[system, user],
-        temperature=0
-    )
-    
-    return json.loads(response.choices[0].message.content.strip())
-
-# Job Description Parser
-def parse_jd_with_gpt(jd_text: str) -> dict:
-    system = {"role": "system", "content": (
-        "You are a job description parser. Extract and return a JSON with fields: responsibilities, required_skills, qualifications."
-    )}
-    user = {"role": "user", "content": jd_text}
-    response = openai.ChatCompletion.create(model="gpt-4", messages=[system, user], temperature=0)
-    return json.loads(response.choices[0].message.content.strip())
 
 #----Matching function ---------------------------------------------------------
 
@@ -295,101 +233,6 @@ def find_top_resumes_for_job(job_title: str, top_n: int = 5):
         r["Rank"] = idx
     return sorted_results[:top_n], None
 
-def find_top_resumes_for_job2(job_title: str, top_n: int = 5):
-    jd_doc = job_descriptions.find_one({"job_title": job_title})
-    if not jd_doc:
-        return [], "Job description not found."
-
-    jd_parsed = jd_doc.get("parsed", {})
-    jd_text = " ".join([
-        "\n".join(jd_parsed.get("responsibilities", [])),
-        "\n".join(jd_parsed.get("required_skills", [])),
-        "\n".join(jd_parsed.get("qualifications", []))
-    ])
-    tech_skills_text = ", ".join(jd_parsed.get("required_skills", []))
-    soft_skills_prompt = f"Extract soft skills from this job description:\n{jd_text}\nReturn a list of important soft skills only."
-
-    try:
-        gpt_soft_resp = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": soft_skills_prompt}],
-            temperature=0
-        )
-        soft_skills = json.loads(gpt_soft_resp.choices[0].message.content)
-    except:
-        soft_skills = ["Communication", "Teamwork", "Problem-solving"]
-
-    all_resumes = list(resumes.find())
-    scored_resumes = []
-
-    for idx, resume in enumerate(all_resumes, 1):
-        parsed = resume.get("parsed", {})
-        resume_text = " ".join([
-            parsed.get("work_experience", ""),
-            parsed.get("education", ""),
-            parsed.get("skills", ""),
-            parsed.get("achievements", "")
-        ])
-
-        # TF-IDF score
-        vectorizer = TfidfVectorizer().fit([jd_text, resume_text])
-        vectors = vectorizer.transform([jd_text, resume_text])
-        tfidf_score = cosine_similarity(vectors[0], vectors[1])[0][0]
-
-        # GPT Matching Reason
-        explanation_prompt = f"""
-        JD:
-        {jd_text}
-
-        RESUME:
-        {resume_text}
-
-        Analyze the match between JD and resume.
-        Return JSON:
-        - match_reason
-        - missing_elements
-        - soft_skills_scores: dict of soft skill -> score /10
-        - technical_skills_scores: dict of tech skill -> score /10
-        - overall_score: out of 10
-        """
-        try:
-            gpt_resp = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[{"role": "system", "content": "You are a resume evaluator."},
-                          {"role": "user", "content": explanation_prompt}],
-                temperature=0
-            )
-            analysis = json.loads(gpt_resp.choices[0].message.content)
-        except Exception as e:
-            analysis = {
-                "match_reason": "N/A",
-                "missing_elements": "N/A",
-                "soft_skills_scores": {},
-                "technical_skills_scores": {},
-                "overall_score": round(tfidf_score * 10, 2)
-            }
-
-        scored_resumes.append({
-            #"Sr. No": idx,
-            "Filename": resume["filename"],
-            "Download": download_link(resume["file_data"], resume["filename"], "⬇️ Download"),
-            "Soft Skills (from JD)": ", ".join(soft_skills),
-            "Soft Skills Score (/10)": sum(analysis.get("soft_skills_scores", {}).values()) / len(soft_skills) if soft_skills else 0,
-            "Technical Skills (from JD)": tech_skills_text,
-            "Technical Skills Score (/10)": sum(analysis.get("technical_skills_scores", {}).values()) / len(jd_parsed.get("required_skills", [])) if jd_parsed.get("required_skills") else 0,
-            "Overall Score (/10)": round(analysis["overall_score"], 2),
-            "Why it scored high": analysis.get("match_reason", "N/A"),
-            "What is missing": analysis.get("missing_elements", "N/A"),
-            "Rank": None  # to be assigned
-        })
-
-    sorted_resumes = sorted(scored_resumes, key=lambda r: r["Overall Score (/10)"], reverse=True)
-    for rank, r in enumerate(sorted_resumes, 1):
-        r["Rank"] = rank
-
-    return sorted_resumes[:top_n], None
-
-
 # Helper function for parsing date
 def parse_date_or_none(dt_str):
     try:
@@ -420,9 +263,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 
 # ─── LangChain Setup ───────────────────────────────────────────────────────────
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.chains import LLMChain
+
 
 llm = ChatOpenAI(model_name="gpt-4", temperature=0)
 
@@ -469,16 +310,6 @@ evaluation_prompt = ChatPromptTemplate.from_messages([
 ])
 evaluation_chain = LLMChain(llm=llm, prompt=evaluation_prompt)
 
-def parse_date_or_none(dt_str):
-    """
-    Try to parse a date string into a datetime.
-    If it fails (e.g. “Current”), return None.
-    """
-    try:
-        # supply default day for month/year inputs
-        return date_parser.parse(dt_str, default=datetime(1900, 1, 1))
-    except Exception:
-        return None
 
 def evaluate_resume_against_jd(resume_text, jd_text):
     try:
@@ -497,6 +328,7 @@ def evaluate_resume_against_jd(resume_text, jd_text):
 
 
 # === Tab 1: Upload, Parse, Save & Evaluate ===
+# === Tab 1: Upload, Parse, Save & Evaluate ===
 with tab1:
     st.header("📄 Upload Resume → Parse → AI Evaluation → Save")
 
@@ -506,6 +338,10 @@ with tab1:
     selected_title = st.selectbox("Select Job Title", ["Select Job Title"] + titles)
 
     uploaded_file = st.file_uploader("Upload Resume (PDF/DOCX)", type=["pdf", "docx"])
+
+    if "last_uploaded_filename" not in st.session_state:
+        st.session_state["last_uploaded_filename"] = None
+        st.session_state["last_resume_id"] = None
 
     if uploaded_file and selected_title != "Select Job Title":
         selected_jd = next((jd for jd in all_jds if jd["job_title"] == selected_title), None)
@@ -536,18 +372,27 @@ with tab1:
                 job["start_date"] = parse_date_or_none(job.get("start_date", ""))
                 job["end_date"] = parse_date_or_none(job.get("end_date", ""))
 
-        # 5) Save Resume into MongoDB
-        resume_doc = {
-            "filename": uploaded_file.name,
-            "upload_time": datetime.utcnow(),
-            "file_type": uploaded_file.type,
-            "file_data": uploaded_file.getvalue(),
-            "job_id": selected_jd["_id"],
-            "parsed": normalized
-        }
-        res_insert = resumes.insert_one(resume_doc)
-        resume_id = res_insert.inserted_id
-        st.success(f"✅ Resume saved successfully (ID: {resume_id})")
+        # 5) Save Resume to DB (ONCE per session)
+        if uploaded_file.name != st.session_state["last_uploaded_filename"]:
+            resume_doc = {
+                "filename": uploaded_file.name,
+                "upload_time": datetime.utcnow(),
+                "file_type": uploaded_file.type,
+                "file_data": uploaded_file.getvalue(),
+                "job_id": selected_jd["_id"],
+                "parsed": normalized
+            }
+            res_insert = resumes.insert_one(resume_doc)
+            resume_id = res_insert.inserted_id
+
+            # Update session state to avoid re-saving
+            st.session_state["last_uploaded_filename"] = uploaded_file.name
+            st.session_state["last_resume_id"] = resume_id
+
+            st.success(f"✅ Resume saved successfully (ID: {resume_id})")
+        else:
+            resume_id = st.session_state["last_resume_id"]
+            st.info(f"ℹ️ Resume already uploaded this session. Using ID: {resume_id}")
 
         # 6) Prepare JD Text
         jd_parsed = selected_jd.get("parsed", {})
@@ -566,40 +411,50 @@ with tab1:
             st.subheader("AI Evaluation Output")
             st.json(eval_output)
 
-            # 8) Build Evaluation Document
-            eval_doc = {
+            # Check if this resume+JD combo already evaluated
+            existing_eval = evaluations.find_one({
                 "resumeId": resume_id,
-                "jobId": selected_jd["_id"],
-                "overallScore": float(eval_output.get("overall_score", 0)),
-                "categoryScores": {
-                    "skillsMatch": float(eval_output.get("skills_match_score", 0)),
-                    "experienceMatch": float(eval_output.get("experience_match_score", 0)),
-                    "educationMatch": float(eval_output.get("education_match_score", 0)),
-                    "certificationMatch": float(eval_output.get("certification_match_score", 0)),
-                },
-                "matchDetails": {
-                    "matchedSkills": eval_output.get("matched_skills", []),
-                    "missingSkills": eval_output.get("missing_skills", []),
-                    "relevantExperience": {
-                        "score": float(eval_output.get("experience_match_score", 0)),
-                        "highlights": eval_output.get("matched_experience", [])
+                "jobId": selected_jd["_id"]
+            })
+
+            if existing_eval:
+                st.info("ℹ️ Evaluation for this resume and JD already exists.")
+            else:
+                # 8) Build Evaluation Document
+                eval_doc = {
+                    "resumeId": resume_id,
+                    "jobId": selected_jd["_id"],
+                    "overallScore": float(eval_output.get("overall_score", 0)),
+                    "categoryScores": {
+                        "skillsMatch": float(eval_output.get("skills_match_score", 0)),
+                        "experienceMatch": float(eval_output.get("experience_match_score", 0)),
+                        "educationMatch": float(eval_output.get("education_match_score", 0)),
+                        "certificationMatch": float(eval_output.get("certification_match_score", 0)),
                     },
-                    "educationAlignment": {
-                        "score": float(eval_output.get("education_match_score", 0)),
-                        "comments": ""
-                    }
-                },
-                "feedback": {
-                    "strengths": eval_output.get("strengths", []),
-                    "weaknesses": eval_output.get("weaknesses", []),
-                    "improvementSuggestions": eval_output.get("missing_skills", [])
-                },
-                "llmAnalysis": "Evaluation generated using GPT-4 (LangChain).",
-                "llmModel": "GPT-4",
-                "evaluationDate": datetime.utcnow()
-            }
-            ev_insert = evaluations.insert_one(eval_doc)
-            st.success(f"✅ Evaluation saved successfully (ID: {ev_insert.inserted_id})")
+                    "matchDetails": {
+                        "matchedSkills": eval_output.get("matched_skills", []),
+                        "missingSkills": eval_output.get("missing_skills", []),
+                        "relevantExperience": {
+                            "score": float(eval_output.get("experience_match_score", 0)),
+                            "highlights": eval_output.get("matched_experience", [])
+                        },
+                        "educationAlignment": {
+                            "score": float(eval_output.get("education_match_score", 0)),
+                            "comments": ""
+                        }
+                    },
+                    "feedback": {
+                        "strengths": eval_output.get("strengths", []),
+                        "weaknesses": eval_output.get("weaknesses", []),
+                        "improvementSuggestions": eval_output.get("missing_skills", [])
+                    },
+                    "llmAnalysis": "Evaluation generated using GPT-4 (LangChain).",
+                    "llmModel": "GPT-4",
+                    "evaluationDate": datetime.utcnow()
+                }
+
+                ev_insert = evaluations.insert_one(eval_doc)
+                st.success(f"✅ Evaluation saved successfully (ID: {ev_insert.inserted_id})")
 
     elif uploaded_file:
         st.warning("⚠️ Please select a valid Job Title before uploading a resume.")
