@@ -165,12 +165,10 @@ with col2:
 st.markdown("---")
 
 # Tabs
-#tab1, tab2 = st.tabs(["📄 Resume Upload", "📊 Top Resume Matching"])
-#tab1, tab2, tab3 = st.tabs(["📄 Resume Upload", "📄 Job Description Upload", "📊 Top Resume Matching"])
 tab1, tab2, tab3 = st.tabs([
-    "📄 Resume Upload", 
-    "📄 Job Description Upload", 
-    "📊 Top Resume Matching Dashboard"
+    "📄 Applicant Portal", 
+    "📄 Recruiter Portal", 
+    "📊 Recruiter Dashboard"
 ])
 
 
@@ -237,9 +235,6 @@ def evaluate_resume_against_jd(resume_text, jd_text):
 
 
 # === Tab 1: Upload, Parse, Save & Evaluate ===
-# === Tab 1: Upload, Parse, Save & Evaluate ===
-
-# === Tab 1: Upload, Parse, Save & Evaluate ===
 with tab1:
     st.header("📄 Upload Resume")
 
@@ -277,9 +272,12 @@ with tab1:
             {resume_text}
 
             Return valid JSON with these keys and types:
+            - first_name (string)
+            - last_name (string)
+            - email (string)
             - matched_skills (array of strings)
             - missing_skills (array of strings)
-            - matched_experience (array of strings)
+            - matched_experience (array of objects with job_title, company, start_date, end_date, description)
             - missing_experience (array of strings)
             - matched_certification (array of strings)
             - missing_certification (array of strings)
@@ -296,10 +294,10 @@ with tab1:
         )
         chain = LLMChain(llm=llm, prompt=evaluation_template)
 
-        with st.spinner("Calling GPT-4 to parse and evaluate resume..."):
+        with st.spinner("Uploading..."):
             try:
                 llm_response = chain.run({"resume_text": resume_text, "jd_text": jd_text})
-                st.expander("Debug: Raw LLM Response").text(llm_response)
+                #st.expander("Debug: Raw LLM Response").text(llm_response)
                 eval_output = extract_json_from_response(llm_response)
 
                 if not eval_output:
@@ -309,8 +307,8 @@ with tab1:
                 st.error(f"❌ Error calling LLM: {e}")
                 st.stop()
 
-        st.subheader("AI Evaluation Output")
-        st.json(eval_output)
+        #st.subheader("AI Evaluation Output")
+        #st.json(eval_output)
 
         # Construct parsed_resume object from evaluation
         parsed_resume = {
@@ -321,12 +319,11 @@ with tab1:
             "certifications": eval_output.get("matched_certification", [])
         }
 
-        # Sanitize fields to match schema
+        # Sanitize fields
         for field in ["work_experience", "skills", "achievements", "certifications"]:
             if not isinstance(parsed_resume.get(field), list):
                 parsed_resume[field] = []
 
-        # Fix education to always be a string
         education_raw = parsed_resume.get("education", "")
         if isinstance(education_raw, list):
             education_raw = ", ".join([str(e) for e in education_raw])
@@ -334,19 +331,23 @@ with tab1:
             education_raw = str(education_raw)
         parsed_resume["education"] = education_raw
 
-        # Parse work experience dates
         cleaned_experience = []
         for job in parsed_resume["work_experience"]:
             if isinstance(job, dict):
                 job["start_date"] = parse_date_or_none(job.get("start_date", ""))
                 job["end_date"] = parse_date_or_none(job.get("end_date", ""))
                 cleaned_experience.append(job)
-            else:
-                # Optional: log or skip string entries
-                print(f"⚠️ Skipped non-dict experience entry: {job}")
-
         parsed_resume["work_experience"] = cleaned_experience
 
+        # Prepare highlights as strings for evaluation schema
+        highlights_str = []
+        for item in parsed_resume["work_experience"]:
+            parts = [
+                f"{item.get('job_title', '')} at {item.get('company', '')}",
+                f"{item.get('start_date', '')} to {item.get('end_date', '')}",
+                item.get("description", "")
+            ]
+            highlights_str.append(" | ".join([p for p in parts if p.strip()]))
 
         if uploaded_file.name != st.session_state["last_uploaded_filename"]:
             resume_doc = {
@@ -355,13 +356,10 @@ with tab1:
                 "file_type": uploaded_file.type,
                 "file_data": uploaded_file.getvalue(),
                 "job_id": selected_jd["_id"],
-                "parsed": {
-                    "work_experience": parsed_resume["work_experience"],
-                    "education": parsed_resume["education"],
-                    "skills": parsed_resume["skills"],
-                    "achievements": parsed_resume["achievements"],
-                    "certifications": parsed_resume["certifications"]
-                }
+                "first_name": eval_output.get("first_name", ""),
+                "last_name": eval_output.get("last_name", ""),
+                "email": eval_output.get("email", ""),
+                "parsed": parsed_resume
             }
             res_insert = resumes.insert_one(resume_doc)
             resume_id = res_insert.inserted_id
@@ -383,6 +381,9 @@ with tab1:
             eval_doc = {
                 "resumeId": resume_id,
                 "jobId": selected_jd["_id"],
+                "first_name": eval_output.get("first_name", ""),
+                "last_name": eval_output.get("last_name", ""),
+                "email": eval_output.get("email", ""),
                 "overallScore": float(eval_output.get("overall_score", 0)),
                 "categoryScores": {
                     "skillsMatch": float(eval_output.get("skills_match_score", 0)),
@@ -395,7 +396,7 @@ with tab1:
                     "missingSkills": eval_output.get("missing_skills", []),
                     "relevantExperience": {
                         "score": float(eval_output.get("experience_match_score", 0)),
-                        "highlights": eval_output.get("matched_experience", [])
+                        "highlights": highlights_str
                     },
                     "educationAlignment": {
                         "score": float(eval_output.get("education_match_score", 0)),
@@ -419,7 +420,6 @@ with tab1:
     else:
         st.info("📥 Upload a resume and select a job title to begin.")
 
-
 # 1) LLM client
 llm = ChatOpenAI(model_name="gpt-4o", temperature=0.7)
 
@@ -435,29 +435,30 @@ jd_parser_chain = LLMChain(llm=llm, prompt=jd_parser_prompt)
 
 # === TAB 2: Job Description Upload & Parsing (LangChain) ===
 with tab2:
-    st.header("📄 Job Description Upload & Parsing")
-    st.write("Enter job title + description or upload a JD file; then LangChain will parse it.")
+    st.header("📄 Job Description Upload")
+    st.write("Enter job title + description or upload a JD file")
 
-    # Initialize session state for text inputs
+    # --- Session State Init (before widgets) ---
     if "job_title" not in st.session_state:
-        st.session_state.job_title = ""
+        st.session_state["job_title"] = ""
     if "job_desc_input" not in st.session_state:
-        st.session_state.job_desc_input = ""
+        st.session_state["job_desc_input"] = ""
 
-    # Widgets with explicit keys
+    # --- Widgets ---
     job_title = st.text_input(
         "Job Title",
-        value=st.session_state.job_title,
+        value=st.session_state["job_title"],
         key="job_title",
         placeholder="e.g., Data Scientist"
     )
+
     jd_file = st.file_uploader(
-        "Or Upload JD PDF/DOCX",
+        "Or Upload JD in PDF/DOCX",
         type=["pdf", "docx"],
         key="jd_file"
     )
 
-    # Extract text if file uploaded
+    # --- Extract text if file uploaded ---
     jd_text = ""
     if jd_file:
         with st.spinner("Extracting text…"):
@@ -465,23 +466,29 @@ with tab2:
 
     job_desc_input = st.text_area(
         "Job Description",
-        value=jd_text if jd_text else st.session_state.job_desc_input,
+        value=jd_text if jd_text else st.session_state["job_desc_input"],
         key="job_desc_input",
         height=250
     )
 
-    if st.button("Parse & Save Job Description"):
+    # --- Save Logic ---
+    if st.button("Save Job Description"):
         if not job_title.strip():
             st.warning("Please enter a job title.")
         elif not job_desc_input.strip():
             st.warning("Please enter or upload a job description.")
         else:
             try:
-                with st.spinner("LangChain parsing via GPT-4…"):
+                with st.spinner("Uploading…"):
                     chain_output = jd_parser_chain.run({"jd_text": job_desc_input.strip()})
-                    parsed_jd = json.loads(chain_output)
+                    parsed_jd = extract_json_from_response(chain_output)
+
+                if not parsed_jd:
+                    st.error("❌ Parsing failed: No valid JSON from LLM.")
+                    st.stop()
 
                 parsed_jd.setdefault("certifications", [])
+
                 jd_doc = {
                     "job_title":   job_title.strip(),
                     "upload_time": datetime.utcnow(),
@@ -500,11 +507,9 @@ with tab2:
                 result = job_descriptions.insert_one(jd_doc)
                 st.success(f"✅ Saved JD with ID: {result.inserted_id}")
 
-                # Reset only the text inputs
-                st.session_state.job_title = ""
-                st.session_state.job_desc_input = ""
-
-                # Rerun to clear file_uploader visually
+                # --- Clean up and rerun ---
+                st.session_state.pop("job_title", None)
+                st.session_state.pop("job_desc_input", None)
                 st.experimental_rerun()
 
             except Exception as e:
@@ -522,7 +527,7 @@ def generate_download_link(file_data, filename, label="Download Resume"):
 
 # ─── Tab 3: Top Resume Matching + Scatter Plot ───────────────────────────────
 with tab3:
-    st.header("📊 Top Resumes for Selected Job")
+    st.header("📊 Top Resume Matching Dashboard")
 
     # 1) Fetch all Job Titles
     jd_list = list(job_descriptions.find())
@@ -546,12 +551,14 @@ with tab3:
 
                 for res in matching_resumes:
                     eval_entry = next((ev for ev in evals if ev["resumeId"] == res["_id"]), None)
-                    
+
                     if not eval_entry:
                         continue
 
-                    # Build leaderboard row
                     rows.append({
+                        "First Name": res.get("first_name", ""),
+                        "Last Name": res.get("last_name", ""),
+                        "Email": res.get("email", ""),
                         "Filename": res["filename"],
                         "Download": generate_download_link(res["file_data"], res["filename"]),
                         "% Match (Overall)": round(eval_entry.get("overallScore", 0), 2),
@@ -565,41 +572,36 @@ with tab3:
                         "Upload Time": res["upload_time"].strftime("%Y-%m-%d %H:%M:%S")
                     })
 
-                    # Build scatter data
                     scatter_data.append({
-                        "Name": res["filename"],
+                        "Name": f"{res.get('first_name', '')} {res.get('last_name', '')}".strip() or res["filename"],
                         "Skills Match": eval_entry.get("categoryScores", {}).get("skillsMatch", 0),
                         "Experience Match": eval_entry.get("categoryScores", {}).get("experienceMatch", 0),
                         "Type": "Resume"
                     })
 
-                # Sort rows by highest overall score
                 rows = sorted(rows, key=lambda x: x["% Match (Overall)"], reverse=True)
 
-                # Add Rank
                 for idx, row in enumerate(rows, 1):
                     row["Rank"] = idx
 
-                # Reorder columns nicely
                 columns_order = [
-                    "Rank", "Filename", "Download",
-                    "% Match (Overall)", "Skills Match", "Experience Match", "Education Match", "Certification Match",
+                    "Rank", "First Name", "Last Name", "Email",
+                    "Filename", "Download",
+                    "% Match (Overall)", "Skills Match", "Experience Match",
+                    "Education Match", "Certification Match",
                     "Missing Skills", "Strengths", "Weaknesses", "Upload Time"
                 ]
-                rows_display = [{col: r[col] for col in columns_order} for r in rows]
+                rows_display = [{col: r.get(col, "") for col in columns_order} for r in rows]
 
-                # 3) Show Leaderboard Table
                 st.subheader(f"🏆 Top Resumes for: {selected_title}")
                 st.write(
                     pd.DataFrame(rows_display).to_html(escape=False, index=False),
                     unsafe_allow_html=True
                 )
 
-                # 4) Scatter Plot after Table
                 if scatter_data:
-                    # Add JD as the starting reference point
                     scatter_data.append({
-                        "Name": f"JD - {selected_title}",
+                        "Name": f"⭐ JD - {selected_title}",
                         "Skills Match": 100,
                         "Experience Match": 100,
                         "Type": "Job Description"
@@ -607,16 +609,15 @@ with tab3:
 
                     scatter_df = pd.DataFrame(scatter_data)
 
-                    scatter_chart = alt.Chart(scatter_df).mark_circle(size=120).encode(
+                    scatter_chart = alt.Chart(scatter_df).mark_circle(size=130).encode(
                         x=alt.X('Skills Match:Q', scale=alt.Scale(domain=[0, 110])),
                         y=alt.Y('Experience Match:Q', scale=alt.Scale(domain=[0, 110])),
                         color='Type:N',
                         tooltip=['Name', 'Skills Match', 'Experience Match']
                     ).interactive()
 
-                    st.subheader("📈 Resume vs Job Description - Skills vs Experience Match")
+                    st.subheader("📈 Resume vs JD: Skills vs Experience")
                     st.altair_chart(scatter_chart, use_container_width=True)
-
             else:
                 st.info("No resumes uploaded for this job description yet.")
         else:
