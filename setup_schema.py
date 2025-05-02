@@ -17,6 +17,9 @@ resume_schema = {
                 "upload_time": {"bsonType": "date"},
                 "file_type": {"bsonType": "string"},
                 "file_data": {"bsonType": "binData"},
+                "first_name": {"bsonType": "string"},
+                "last_name": {"bsonType": "string"},
+                "email": {"bsonType": "string"},
                 "parsed": {
                     "bsonType": "object",
                     "required": ["work_experience", "education", "skills", "achievements", "certifications"],
@@ -30,12 +33,12 @@ resume_schema = {
                                     "job_title": {"bsonType": "string"},
                                     "company": {"bsonType": "string"},
                                     "start_date": {"bsonType": "date"},
-                                    "end_date": {"bsonType": ["date", "null"]},  # null if currently working
+                                    "end_date": {"bsonType": ["date", "null"]},
                                     "description": {"bsonType": "string"}
                                 }
                             }
                         },
-                        "education": {"bsonType": "string"},  # we can later split this into array if needed
+                        "education": {"bsonType": "string"},
                         "skills": {"bsonType": "array", "items": {"bsonType": "string"}},
                         "achievements": {"bsonType": "array", "items": {"bsonType": "string"}},
                         "certifications": {"bsonType": "array", "items": {"bsonType": "string"}}
@@ -45,6 +48,7 @@ resume_schema = {
         }
     }
 }
+
 
 
 job_description_schema = {
@@ -79,13 +83,17 @@ evaluations_schema = {
     "validator": {
         "$jsonSchema": {
             "bsonType": "object",
-            "required": ["resumeId", "jobId", "overallScore", "categoryScores", "matchDetails", "feedback", "llmAnalysis", "llmModel", "evaluationDate"],
+            "required": [
+                "resumeId", "jobId", "overallScore", "categoryScores", 
+                "matchDetails", "feedback", "llmAnalysis", "llmModel", "evaluationDate"
+            ],
             "properties": {
-                "resumeId": {"bsonType": "objectId"},  # Link to resumes _id
-                "jobId": {"bsonType": "objectId"},     # Link to job_descriptions _id
-                
-                "overallScore": {"bsonType": "double"},  # Overall out of 100 or 10, your choice
-                
+                "resumeId": {"bsonType": "objectId"},
+                "jobId": {"bsonType": "objectId"},
+                "overallScore": {"bsonType": "double"},
+                "first_name": {"bsonType": "string"},
+                "last_name": {"bsonType": "string"},
+                "email": {"bsonType": "string"},
                 "categoryScores": {
                     "bsonType": "object",
                     "required": ["skillsMatch", "experienceMatch", "educationMatch", "certificationMatch"],
@@ -96,7 +104,6 @@ evaluations_schema = {
                         "certificationMatch": {"bsonType": "double"}
                     }
                 },
-                
                 "matchDetails": {
                     "bsonType": "object",
                     "properties": {
@@ -118,7 +125,6 @@ evaluations_schema = {
                         }
                     }
                 },
-
                 "feedback": {
                     "bsonType": "object",
                     "properties": {
@@ -127,10 +133,9 @@ evaluations_schema = {
                         "improvementSuggestions": {"bsonType": "array", "items": {"bsonType": "string"}}
                     }
                 },
-
-                "llmAnalysis": {"bsonType": "string"},   # Detailed LLM feedback text
-                "llmModel": {"bsonType": "string"},       # "GPT-4", "Gemini Pro", etc
-                "evaluationDate": {"bsonType": "date"}    # ISO Date
+                "llmAnalysis": {"bsonType": "string"},
+                "llmModel": {"bsonType": "string"},
+                "evaluationDate": {"bsonType": "date"}
             }
         }
     }
