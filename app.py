@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import docx
+import base64
 import openai
 import base64
 from dateutil import parser as date_parser
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from streamlit_option_menu import option_menu  # new import
 
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -53,58 +55,46 @@ def extract_text(uploaded_file) -> str:
 
 # New function to normalize parsed data for MongoDB schema compatibility
 def normalize_for_mongodb(parsed_data):
-    """Convert arrays and objects to strings for MongoDB schema compatibility"""
     normalized = {}
-    
     for key, value in parsed_data.items():
         if isinstance(value, list):
-            # Convert list to a formatted string
             if all(isinstance(item, dict) for item in value):
-                # Handle list of objects (like work experience entries)
                 formatted_items = []
                 for item in value:
                     item_str = "\n".join([f"{k}: {v}" for k, v in item.items()])
                     formatted_items.append(item_str)
                 normalized[key] = "\n\n".join(formatted_items)
             else:
-                # Handle list of strings (like skills)
                 normalized[key] = ", ".join(str(item) for item in value)
         elif isinstance(value, dict):
-            # Convert dict to a formatted string
             normalized[key] = "\n".join([f"{k}: {v}" for k, v in value.items()])
         else:
-            # Keep strings as they are
             normalized[key] = str(value)
-    
     return normalized
+
+# Helper function to create a download link for each resume
+def generate_download_link(file_data, filename, label=None):
+    if label is None:
+        label = filename  # Set the label to the filename if not provided
+    b64 = base64.b64encode(file_data).decode()
+    return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
 
 def extract_json_from_response(text):
     try:
-        # Find JSON content between possible markdown backticks
         json_match = re.search(r'```(?:json)?(.*?)```', text, re.DOTALL)
         if json_match:
-            # Extract content from between backticks
             json_content = json_match.group(1).strip()
         else:
-            # If no backticks, use the entire text
             json_content = text.strip()
-            
-        # Remove any non-JSON characters at beginning and end
-        # Find first '{' and last '}'
         start_idx = json_content.find('{')
         end_idx = json_content.rfind('}')
-        
         if start_idx != -1 and end_idx != -1:
             json_content = json_content[start_idx:end_idx+1]
-            
-        # Parse the JSON
         return json.loads(json_content)
     except Exception as e:
         print(f"❌ Failed to parse JSON: {e}")
-        print(f"Problematic text: {text[:200]}...")  # Print first 200 chars for debugging
+        print(f"Problematic text: {text[:200]}...")
         return None
-
-#----Matching function ---------------------------------------------------------
 
 def evaluate_resume_with_gpt(jd_text, resume_text):
     prompt = f"""
@@ -139,14 +129,11 @@ Return JSON:
     )
     return json.loads(response.choices[0].message.content.strip())
 
-
 def download_link(data: bytes, filename: str, label: str) -> str:
     b64 = base64.b64encode(data).decode()
     href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
     return href
 
-
-# Helper function for parsing date
 def parse_date_or_none(dt_str):
     try:
         return date_parser.parse(dt_str, default=datetime(1900, 1, 1))
@@ -156,22 +143,32 @@ def parse_date_or_none(dt_str):
 #─── STREAMLIT APP ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AIcruit", page_icon=":guardsman:", layout="wide")
 
-# Top Header
-col1, col2 = st.columns([0.1, 0.9])
-with col1:
-    st.image("AIcruit_logo.png", width=150)
-with col2:
-    st.title("AIcruit")
-st.markdown("---")
-
-# Tabs
-tab1, tab2, tab3 = st.tabs([
-    "📄 Applicant Portal", 
-    "📄 Recruiter Portal", 
-    "📊 Recruiter Dashboard"
-])
+# Sidebar with logo and menu
+with st.sidebar:
+    st.image("AIcruit_logo.png", width=300)
 
 
+    selected = option_menu(
+        menu_title=None,
+        options=["📄 Applicant Portal", "📄 Recruiter Portal", "📊 Recruiter Dashboard"],
+        icons=[None] * 3,  # No icons
+        default_index=0,
+        orientation="vertical",
+        styles={
+            "container": {"padding": "0!important", "background-color": "#f8f9fa"},
+            "icon": {"color": "black", "font-size": "0px"},  # Hides icons completely
+            "nav-link": {
+                "font-size": "14px",       # Reduced font size
+                "text-align": "left",
+                "margin": "0px",
+                "--hover-color": "#e0f0ff"  # Light blue on hover
+            },
+            "nav-link-selected": {
+                "background-color": "#3399ff",  # Blue on select
+                "color": "white"
+            },
+        }
+    )
 # ─── LangChain Setup ───────────────────────────────────────────────────────────
 
 
@@ -235,7 +232,8 @@ def evaluate_resume_against_jd(resume_text, jd_text):
 
 
 # === Tab 1: Upload, Parse, Save & Evaluate ===
-with tab1:
+if selected == "📄 Applicant Portal":
+    #st.header("📄 Applicant Portal")
     st.header("📄 Upload Resume")
 
     all_jds = list(job_descriptions.find())
@@ -413,30 +411,32 @@ with tab1:
                 "evaluationDate": datetime.utcnow()
             }
             ev_insert = evaluations.insert_one(eval_doc)
-            st.success(f"✅ Evaluation saved successfully (ID: {ev_insert.inserted_id})")
+            #st.success(f"✅ Evaluation saved successfully (ID: {ev_insert.inserted_id})")
 
     elif uploaded_file:
         st.warning("⚠️ Please select a valid Job Title before uploading a resume.")
     else:
         st.info("📥 Upload a resume and select a job title to begin.")
 
-# 1) LLM client
-llm = ChatOpenAI(model_name="gpt-4o", temperature=0.7)
+
+# === TAB 2: Job Description Upload & Parsing (LangChain) ===
+elif selected == "📄 Recruiter Portal":
+    #st.header("📄 Recruiter Portal")
+    st.header("📄 Job Description Upload")
+    st.write("Enter job title + description or upload a JD file")
+
+
+    # 1) LLM client
+    llm = ChatOpenAI(model_name="gpt-4o", temperature=0.7)
 
 # 2) Prompt template for JD parsing (responsibilities, required_skills, qualifications, certifications)
-jd_parser_prompt = ChatPromptTemplate.from_messages([
+    jd_parser_prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a job description parser. Extract and return valid JSON with keys: responsibilities, required_skills, qualifications, certifications."),
     ("user", "{jd_text}")
 ])
 
 # 3) Build the chain
-jd_parser_chain = LLMChain(llm=llm, prompt=jd_parser_prompt)
-
-
-# === TAB 2: Job Description Upload & Parsing (LangChain) ===
-with tab2:
-    st.header("📄 Job Description Upload")
-    st.write("Enter job title + description or upload a JD file")
+    jd_parser_chain = LLMChain(llm=llm, prompt=jd_parser_prompt)
 
     # --- Session State Init (before widgets) ---
     if "job_title" not in st.session_state:
@@ -510,23 +510,17 @@ with tab2:
                 # --- Clean up and rerun ---
                 st.session_state.pop("job_title", None)
                 st.session_state.pop("job_desc_input", None)
-                st.experimental_rerun()
+                st.rerun() 
 
             except Exception as e:
                 st.error(f"❌ Error: {e}")
 
 
 # Tab 3: Matching 
-import base64
-
-# Helper function to create a download link for each resume
-def generate_download_link(file_data, filename, label="Download Resume"):
-    b64 = base64.b64encode(file_data).decode()
-    return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
-
 
 # ─── Tab 3: Top Resume Matching + Scatter Plot ───────────────────────────────
-with tab3:
+elif selected == "📊 Recruiter Dashboard":
+    #st.header("📊 Recruiter Dashboard")
     st.header("📊 Top Resume Matching Dashboard")
 
     # 1) Fetch all Job Titles
@@ -559,8 +553,8 @@ with tab3:
                         "First Name": res.get("first_name", ""),
                         "Last Name": res.get("last_name", ""),
                         "Email": res.get("email", ""),
-                        "Filename": res["filename"],
-                        "Download": generate_download_link(res["file_data"], res["filename"]),
+                        #"Filename": res["filename"],
+                        "Resume": generate_download_link(res["file_data"], res["filename"]),
                         "% Match (Overall)": round(eval_entry.get("overallScore", 0), 2),
                         "Skills Match": round(eval_entry.get("categoryScores", {}).get("skillsMatch", 0), 2),
                         "Experience Match": round(eval_entry.get("categoryScores", {}).get("experienceMatch", 0), 2),
@@ -586,7 +580,7 @@ with tab3:
 
                 columns_order = [
                     "Rank", "First Name", "Last Name", "Email",
-                    "Filename", "Download",
+                     "Resume",
                     "% Match (Overall)", "Skills Match", "Experience Match",
                     "Education Match", "Certification Match",
                     "Missing Skills", "Strengths", "Weaknesses", "Upload Time"
