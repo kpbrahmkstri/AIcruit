@@ -12,6 +12,10 @@ import base64
 from dateutil import parser as date_parser
 from streamlit.components.v1 import html
 import altair as alt
+from fastapi import FastAPI, UploadFile, File, Form
+from pydantic import BaseModel
+from typing import List, Optional
+from fastapi.middleware.cors import CORSMiddleware
 
 from datetime import datetime
 from pymongo import MongoClient
@@ -36,6 +40,16 @@ resumes   = db["resumes"]
 job_descriptions = db["job_descriptions"]
 evaluations = db["evaluations"]
 
+# ─── FASTAPI APP ─────────────────────────────────────────────────────────────
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 #─── RAW TEXT EXTRACTION ────────────────────────────────────────────────────────
 def extract_text(uploaded_file) -> str:
     name = uploaded_file.name.lower()
@@ -52,25 +66,13 @@ def extract_text(uploaded_file) -> str:
     else:
         st.error("Unsupported file type")
         return ""
+    
+def parse_date_or_none(dt_str):
+    try:
+        return date_parser.parse(dt_str, default=datetime(1900, 1, 1))
+    except Exception:
+        return None
 
-# New function to normalize parsed data for MongoDB schema compatibility
-def normalize_for_mongodb(parsed_data):
-    normalized = {}
-    for key, value in parsed_data.items():
-        if isinstance(value, list):
-            if all(isinstance(item, dict) for item in value):
-                formatted_items = []
-                for item in value:
-                    item_str = "\n".join([f"{k}: {v}" for k, v in item.items()])
-                    formatted_items.append(item_str)
-                normalized[key] = "\n\n".join(formatted_items)
-            else:
-                normalized[key] = ", ".join(str(item) for item in value)
-        elif isinstance(value, dict):
-            normalized[key] = "\n".join([f"{k}: {v}" for k, v in value.items()])
-        else:
-            normalized[key] = str(value)
-    return normalized
 
 # Helper function to create a download link for each resume
 def generate_download_link(file_data, filename, label=None):
@@ -96,49 +98,6 @@ def extract_json_from_response(text):
         print(f"Problematic text: {text[:200]}...")
         return None
 
-def evaluate_resume_with_gpt(jd_text, resume_text):
-    prompt = f"""
-Given the following job description:
-{jd_text}
-
-And this resume:
-{resume_text}
-
-Evaluate the resume for:
-1. Keyword matches
-2. Relevant experience
-3. Skills alignment (technical & soft)
-4. Overall presentation
-
-Return JSON:
-{{
-  "keyword_score": int (0-10),
-  "experience_score": int (0-10),
-  "technical_skills_score": int (0-10),
-  "soft_skills_score": int (0-10),
-  "presentation_score": int (0-10),
-  "overall_score": float (0-10),
-  "match_reason": string,
-  "missing_elements": string
-}}
-"""
-    response = openai.ChatCompletion.create(
-        model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a resume reviewer."}, {"role": "user", "content": prompt}],
-        temperature=0.7
-    )
-    return json.loads(response.choices[0].message.content.strip())
-
-def download_link(data: bytes, filename: str, label: str) -> str:
-    b64 = base64.b64encode(data).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
-    return href
-
-def parse_date_or_none(dt_str):
-    try:
-        return date_parser.parse(dt_str, default=datetime(1900, 1, 1))
-    except Exception:
-        return None
 
 #─── STREAMLIT APP ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AIcruit", page_icon=":guardsman:", layout="wide")
