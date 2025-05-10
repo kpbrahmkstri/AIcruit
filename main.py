@@ -293,3 +293,7 @@ def get_dashboard(job_title: str):
 def get_job_titles():
     titles = job_descriptions.distinct("job_title")
     return {"titles": sorted(titles)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
