@@ -96,12 +96,13 @@ evaluations_schema = {
                 "email": {"bsonType": "string"},
                 "categoryScores": {
                     "bsonType": "object",
-                    "required": ["skillsMatch", "experienceMatch", "educationMatch", "certificationMatch"],
+                    "required": ["skillsMatch", "experienceMatch", "educationMatch", "certificationMatch", "keywordMatch"],
                     "properties": {
                         "skillsMatch": {"bsonType": "double"},
                         "experienceMatch": {"bsonType": "double"},
                         "educationMatch": {"bsonType": "double"},
-                        "certificationMatch": {"bsonType": "double"}
+                        "certificationMatch": {"bsonType": "double"},
+                        "keywordMatch": {"bsonType": "double"}
                     }
                 },
                 "matchDetails": {

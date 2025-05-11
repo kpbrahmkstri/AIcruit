@@ -3,6 +3,9 @@ import requests
 import pandas as pd
 import altair as alt
 from streamlit_option_menu import option_menu
+import io
+import pdfplumber
+from docx import Document
 
 API_BASE = "http://localhost:8000"
 
@@ -72,15 +75,25 @@ if selected == "📄 Applicant Portal":
         st.info("📥 Upload your resume and select a job title to proceed.")
 
 # === RECRUITER PORTAL ===
+# === RECRUITER PORTAL ===
 elif selected == "📄 Recruiter Portal":
     st.title("📄 Upload Job Description")
     job_title = st.text_input("Job Title", placeholder="e.g., Data Scientist")
     jd_file = st.file_uploader("Upload JD File (PDF/DOCX)", type=["pdf", "docx"])
     jd_text = ""
+    jd_bytes = None
 
     if jd_file:
         try:
-            jd_text = jd_file.read().decode("utf-8", errors="ignore")
+            jd_bytes = jd_file.read()  # Read once and reuse
+            if jd_file.name.endswith(".pdf"):
+                with pdfplumber.open(io.BytesIO(jd_bytes)) as pdf:
+                    jd_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            elif jd_file.name.endswith(".docx"):
+                doc = Document(io.BytesIO(jd_bytes))
+                jd_text = "\n".join([para.text for para in doc.paragraphs])
+            else:
+                st.warning("Unsupported file type.")
         except Exception as e:
             st.error(f"Failed to read JD file: {e}")
 
@@ -94,7 +107,7 @@ elif selected == "📄 Recruiter Portal":
         else:
             with st.spinner("Uploading JD and parsing via GPT..."):
                 try:
-                    files = {"file": (jd_file.name, jd_file, jd_file.type)} if jd_file else {}
+                    files = {"file": (jd_file.name, io.BytesIO(jd_bytes), jd_file.type)} if jd_bytes else {}
                     data = {"job_title": job_title, "job_desc_input": jd_input}
                     response = requests.post(f"{API_BASE}/upload-jd/", data=data, files=files)
                     if response.status_code == 200:
@@ -133,7 +146,7 @@ elif selected == "📊 Recruiter Dashboard":
                         df[[
                             "Rank", "First Name", "Last Name", "Email", "Resume",
                             "Match Overall", "Skills Match", "Experience Match",
-                            "Education Match", "Certification Match",
+                            "Education Match", "Certification Match", "Keyword Match",
                             "Missing Skills", "Strengths", "Weaknesses", "Upload Time"
                         ]].to_html(escape=False, index=False),
                         unsafe_allow_html=True
@@ -141,15 +154,21 @@ elif selected == "📊 Recruiter Dashboard":
 
                     if scatter:
                         scatter_df = pd.DataFrame(scatter)
-                        chart = alt.Chart(scatter_df).mark_circle(size=130).encode(
-                            x=alt.X("Skills Match:Q", scale=alt.Scale(domain=[0, 110])),
-                            y=alt.Y("Experience Match:Q", scale=alt.Scale(domain=[0, 110])),
-                            color="Type:N",
-                            tooltip=["Name", "Skills Match", "Experience Match"]
-                        ).interactive()
 
-                        st.subheader("📈 Skills vs Experience Plot")
-                        st.altair_chart(chart, use_container_width=True)
+                        # Filter out rows with missing or invalid data
+                        scatter_df = scatter_df.dropna(subset=["Skills Match", "Experience Match"])
+
+                        if not scatter_df.empty:
+                            st.subheader("📈 Skills vs Experience Plot")
+                            chart = alt.Chart(scatter_df).mark_circle(size=130).encode(
+                                x=alt.X("Skills Match:Q", scale=alt.Scale(domain=[0, 110])),
+                                y=alt.Y("Experience Match:Q", scale=alt.Scale(domain=[0, 110])),
+                                color="Type:N",
+                                tooltip=["Name", "Skills Match", "Experience Match"]
+                            ).interactive()
+                            st.altair_chart(chart, use_container_width=True)
+                        else:
+                            st.info("📭 No valid resume data to plot.")
             except Exception as e:
                 st.error(f"❌ Failed to fetch data: {e}")
     else:

@@ -42,11 +42,18 @@ def extract_text_from_bytes(data: bytes, filename: str) -> str:
         text = ""
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for page in pdf.pages:
-                text += page.extract_text() + "\n"
+                text += page.extract_text() or ""
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Failed to extract text from PDF.")
         return text
+
     elif filename.endswith(".docx"):
         doc = docx.Document(io.BytesIO(data))
-        return "\n".join([p.text for p in doc.paragraphs])
+        text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Failed to extract text from DOCX.")
+        return text
+
     else:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
@@ -71,29 +78,54 @@ def extract_json_from_response(text: str):
 llm = ChatOpenAI(model_name="gpt-4o", temperature=0.7)
 
 evaluation_prompt = ChatPromptTemplate.from_template(
-    """You are an AI resume evaluator.
+    """You are an AI resume evaluator. \n"
     Given the following job description:
     {jd_text}
     And this resume:
     {resume_text}
-    Return valid JSON with these keys:
-    - first_name
-    - last_name
-    - email
-    - matched_skills
-    - missing_skills
-    - matched_experience (list of objects: job_title, company, start_date, end_date, description)
-    - missing_experience
-    - matched_certification
-    - missing_certification
-    - skills_match_score
-    - experience_match_score
-    - education_match_score
-    - certification_match_score
-    - overall_score
-    - strengths
-    - weaknesses
-    IMPORTANT: Return ONLY valid JSON with no extra text or comments.
+    Return valid JSON with these keys and types: \n "
+    "- first_name (string)\n"
+    "- last_name (string)\n"
+    "- email (string)\n"
+    "- matched_skills (array of strings) \n"
+    "- missing_skills (array of strings) \n"
+    "- matched_experience (list of objects: job_title, company, start_date, end_date, description) \n"
+    "- missing_experience  (array of strings) \n"
+    "- matched_certification  (array of strings) \n"
+    "- missing_certification  (array of strings) \n"
+    "- skills_match_score (number between 0 and 100) \n"
+    "- keyword_score (number between 0 and 100) \n"
+    "- experience_match_score (number between 0 and 100) \n"
+    "- education_match_score (number between 0 and 100) \n"
+    "- certification_match_score (number between 0 and 100) \n"
+    "- overall_score (number between 0 and 100) \n"
+    "- strengths  (array of strings) \n"
+    "- weaknesses  (array of strings) \n"
+    
+    Return JSON:
+    {{
+    "keyword_score": int(0-10),
+    "experience_score": int(0-10),
+    "technical_skills_score": int(0-10),
+    "soft_skills_score": int(0-10),
+    "presentation_score":int(0-10),
+    "overall_score": int(0-10),
+    "match_reason" string,
+    "missing_elements": string,
+    "-matched_skills (array of strings) \n"
+    "-missing_skills (array of strings) \n"
+    "-matched_experience (array of strings) \n"
+    "-missing_experience (array of strings) \n"
+    "-matched_certifications (array of strings) \n"
+    "-missing_certifications (array of strings) \n"
+    "-skills_match_score (number between 0 and 100) \n"
+    "-experience_match_score (number between 0 and 100) \n"
+    "-education_match_score (number between 0 and 100) \n"
+    "-certification_match_score (number between 0 and 100) \n"
+    "-overall_score (number between 0 and 100) \n"
+    "-strengths (array of strings) \n"
+    "-weaknesses (array of strings) \n"
+    }}
     """
 )
 evaluation_chain = LLMChain(llm=llm, prompt=evaluation_prompt)
@@ -186,7 +218,8 @@ async def upload_resume(job_title: str = Form(...), file: UploadFile = File(...)
             "skillsMatch": float(parsed.get("skills_match_score", 0)),
             "experienceMatch": float(parsed.get("experience_match_score", 0)),
             "educationMatch": float(parsed.get("education_match_score", 0)),
-            "certificationMatch": float(parsed.get("certification_match_score", 0))
+            "certificationMatch": float(parsed.get("certification_match_score", 0)),
+            "keywordMatch": float(parsed.get("keyword_score", 0) * 10)  # assuming keyword_score is 0-10
         },
         "matchDetails": {
             "matchedSkills": parsed.get("matched_skills", []),
@@ -215,21 +248,35 @@ async def upload_resume(job_title: str = Form(...), file: UploadFile = File(...)
 
 # ─── Endpoint: Upload JD ─────────────────────────────────────────────────────────
 @app.post("/upload-jd/")
-async def upload_jd(job_title: str = Form(...), job_desc_input: str = Form(...), file: UploadFile = File(None)):
+async def upload_jd(job_title: str = Form(...), job_desc_input: str = Form(""), file: UploadFile = File(None)):
     try:
-        jd_text = extract_text_from_bytes(file.file.read(), file.filename) if file else job_desc_input
-        chain_output = jd_parser_chain.run({"jd_text": jd_text.strip()})
+        jd_text = job_desc_input.strip()
+        file_data = None
+        filename = "manual_entry"
+        content_type = "text"
+
+        if file:
+            file_data = await file.read()
+            filename = file.filename
+            content_type = file.content_type
+            jd_text = extract_text_from_bytes(file_data, filename.lower())
+
+        if not jd_text.strip():
+            raise HTTPException(status_code=400, detail="Job description is empty.")
+
+        chain_output = jd_parser_chain.run({"jd_text": jd_text})
         parsed_jd = extract_json_from_response(chain_output)
         if not parsed_jd:
             raise HTTPException(status_code=500, detail="Failed to parse JD")
+
         parsed_jd.setdefault("certifications", [])
         jd_doc = {
             "job_title": job_title.strip(),
             "upload_time": datetime.utcnow(),
-            "file_type": file.content_type if file else "text",
-            "filename": file.filename if file else "manual_entry",
-            "file_data": file.file.read() if file else None,
-            "description": jd_text.strip(),
+            "file_type": content_type,
+            "filename": filename,
+            "file_data": file_data,
+            "description": jd_text,
             "parsed": {
                 "responsibilities": parsed_jd.get("responsibilities", []),
                 "required_skills": parsed_jd.get("required_skills", []),
@@ -267,6 +314,7 @@ def get_dashboard(job_title: str):
             "Experience Match": round(ev.get("categoryScores", {}).get("experienceMatch", 0), 2),
             "Education Match": round(ev.get("categoryScores", {}).get("educationMatch", 0), 2),
             "Certification Match": round(ev.get("categoryScores", {}).get("certificationMatch", 0), 2),
+            "Keyword Match": round(ev.get("categoryScores", {}).get("keywordMatch", 0), 2),
             "Missing Skills": ", ".join(ev.get("matchDetails", {}).get("missingSkills", [])),
             "Strengths": ", ".join(ev.get("feedback", {}).get("strengths", [])),
             "Weaknesses": ", ".join(ev.get("feedback", {}).get("weaknesses", [])),
