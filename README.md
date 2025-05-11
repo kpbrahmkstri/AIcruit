@@ -22,3 +22,15 @@ python -m venv venv
 
 # Install dependencies
 pip install -r requirements.txt
+
+#Create .env file in the project root folder to read the API KEYS
+MONGO_URI=<value>
+OPENAI_API_KEY=<value>
+
+#Run the app using the commands
+
+#1. First run below to start backend:
+uvicorn main:app --reload
+
+#2. Now in another terminal, run frontend:
+streamlit run .\frontend.py
