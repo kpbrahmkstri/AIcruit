@@ -34,6 +34,3 @@ uvicorn main:app --reload
 
 #2. Now in another terminal, run frontend:
 streamlit run .\frontend.py
-
-
-![alt text](image.png)
