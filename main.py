@@ -219,7 +219,7 @@ async def upload_resume(job_title: str = Form(...), file: UploadFile = File(...)
             "experienceMatch": float(parsed.get("experience_match_score", 0)),
             "educationMatch": float(parsed.get("education_match_score", 0)),
             "certificationMatch": float(parsed.get("certification_match_score", 0)),
-            "keywordMatch": float(parsed.get("keyword_score", 0) * 10)  # assuming keyword_score is 0-10
+            "keywordMatch": float(parsed.get("keyword_score", 0))  # assuming keyword_score is 0-10
         },
         "matchDetails": {
             "matchedSkills": parsed.get("matched_skills", []),

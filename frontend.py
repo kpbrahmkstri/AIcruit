@@ -57,13 +57,14 @@ if selected == "📄 Applicant Portal":
 
     if uploaded_file and selected_job != "Select Job Title":
         if st.button("Submit Resume"):
-            with st.spinner("Uploading and evaluating resume..."):
+            #with st.spinner("Uploading and evaluating resume..."):
+            with st.spinner("Uploading resume..."):
                 try:
                     files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
                     data = {"job_title": selected_job}
                     response = requests.post(f"{API_BASE}/upload-resume/", data=data, files=files)
                     if response.status_code == 200:
-                        st.success("✅ Resume uploaded and evaluated successfully!")
+                        st.success("✅ Resume uploaded successfully!")
                         st.json(response.json())
                     else:
                         st.error(f"❌ Error {response.status_code}: {response.text}")
@@ -105,13 +106,14 @@ elif selected == "📄 Recruiter Portal":
         elif not jd_input.strip():
             st.warning("Please enter or upload a job description.")
         else:
-            with st.spinner("Uploading JD and parsing via GPT..."):
+            #with st.spinner("Uploading JD and parsing via GPT..."):
+            with st.spinner("Uploading Job Description..."):
                 try:
                     files = {"file": (jd_file.name, io.BytesIO(jd_bytes), jd_file.type)} if jd_bytes else {}
                     data = {"job_title": job_title, "job_desc_input": jd_input}
                     response = requests.post(f"{API_BASE}/upload-jd/", data=data, files=files)
                     if response.status_code == 200:
-                        st.success("✅ Job description uploaded and parsed!")
+                        st.success("✅ Job description uploaded!")
                         st.json(response.json())
                     else:
                         st.error(f"❌ Error {response.status_code}: {response.text}")
