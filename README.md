@@ -1,4 +1,4 @@
-# Project Title
+# AICruit
 
 A GenAI based solution to identify the top talent.
 
